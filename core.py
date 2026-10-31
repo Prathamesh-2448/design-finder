@@ -5,8 +5,10 @@ No web-framework code lives here, so index.py, app.py and evaluate.py can all us
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -246,6 +248,18 @@ class Index:
             model=meta["model"],
         )
 
+    def with_extra(self, vectors: np.ndarray, design_pos: np.ndarray) -> "Index":
+        """A copy of this index plus extra reference vectors (e.g. confirmed customer photos)."""
+        if len(vectors) == 0:
+            return self
+        return Index(
+            vectors=np.concatenate([self.vectors, vectors]),
+            view_design=np.concatenate([self.view_design, design_pos]),
+            designs=self.designs,
+            files=self.files,
+            model=self.model,
+        )
+
     def scores(self, query_vectors: np.ndarray) -> np.ndarray:
         """Best cosine similarity per design (max over the photo's views x the design's views)."""
         per_view = (query_vectors @ self.vectors.T).max(axis=0)
@@ -257,3 +271,90 @@ class Index:
         best = self.scores(query_vectors)
         order = np.argsort(-best)[:k]
         return [(self.designs[i], self.files[i], float(best[i])) for i in order]
+
+
+# ------------------------------------------------------------- manager feedback
+# When the manager confirms "this was the right design", the customer's photo is kept
+# under data/feedback/<design>/ and used as an extra reference for that design. It lives
+# apart from the catalog index, so re-running index.py never deletes it.
+
+FEEDBACK_KEEP = 20  # newest confirmed photos kept per design
+_FEEDBACK_ID = re.compile(r"^[0-9a-f]{16}$")
+
+
+def valid_feedback_id(fid: str) -> bool:
+    return bool(_FEEDBACK_ID.match(fid))
+
+
+def _feedback_fingerprint() -> str:
+    key = f"v{INDEX_VERSION}|{MODEL_NAME}|{INPUT_SIZE}|{QUERY_SCALES}"
+    return hashlib.sha1(key.encode()).hexdigest()
+
+
+def _feedback_vectors(npz_path: Path, jpg_path: Path, embedder) -> np.ndarray:
+    """Vectors for one saved photo; re-embedded if the model or settings changed since."""
+    fingerprint = _feedback_fingerprint()
+    if npz_path.exists():
+        try:
+            with np.load(npz_path) as z:
+                if str(z["fingerprint"]) == fingerprint:
+                    return z["vectors"]
+        except Exception:
+            pass
+    img = load_image(jpg_path, max_side=1600)
+    vectors = embedder.embed(query_views(img, rotations=[0]))
+    np.savez(npz_path, vectors=vectors, fingerprint=np.array(fingerprint))
+    return vectors
+
+
+def save_feedback(data_dir, design: str, raw: bytes, embedder) -> str:
+    """Store a confirmed customer photo for `design`. Returns its id (for undo)."""
+    img = load_image(io.BytesIO(raw), max_side=1600)
+    fid = hashlib.sha1(design.encode() + b"|" + raw).hexdigest()[:16]  # same photo twice = one entry
+    folder = Path(data_dir) / "feedback" / design
+    folder.mkdir(parents=True, exist_ok=True)
+    jpg = folder / f"{fid}.jpg"
+    if jpg.exists():
+        os.utime(jpg)  # re-confirmed: counts as newest
+    else:
+        img.save(jpg, "JPEG", quality=90)
+    _feedback_vectors(folder / f"{fid}.npz", jpg, embedder)
+
+    photos = sorted(folder.glob("*.jpg"), key=lambda p: p.stat().st_mtime_ns, reverse=True)
+    for old in photos[FEEDBACK_KEEP:]:
+        old.unlink(missing_ok=True)
+        old.with_suffix(".npz").unlink(missing_ok=True)
+    return fid
+
+
+def delete_feedback(data_dir, design: str, fid: str) -> bool:
+    """Undo a confirmation. `design` must be a known design and `fid` pass valid_feedback_id()."""
+    jpg = Path(data_dir) / "feedback" / design / f"{fid}.jpg"
+    existed = jpg.exists()
+    jpg.unlink(missing_ok=True)
+    jpg.with_suffix(".npz").unlink(missing_ok=True)
+    return existed
+
+
+def feedback_count(data_dir, design: str) -> int:
+    folder = Path(data_dir) / "feedback" / design
+    return len(list(folder.glob("*.jpg"))) if folder.is_dir() else 0
+
+
+def load_feedback_vectors(data_dir, designs: list[str], embedder) -> tuple[np.ndarray, np.ndarray]:
+    """All saved photos' vectors for the designs in the index, plus each vector's design position."""
+    vectors, positions = [], []
+    for i, design in enumerate(designs):
+        folder = Path(data_dir) / "feedback" / design
+        if not folder.is_dir():
+            continue
+        for jpg in sorted(folder.glob("*.jpg")):
+            try:
+                v = _feedback_vectors(jpg.with_suffix(".npz"), jpg, embedder)
+            except Exception:
+                continue  # unreadable photo: skip it rather than break search
+            vectors.append(v)
+            positions += [i] * len(v)
+    if not vectors:
+        return np.zeros((0, 0), np.float32), np.zeros(0, dtype=int)
+    return np.concatenate(vectors).astype(np.float32), np.array(positions)

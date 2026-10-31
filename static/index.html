@@ -53,6 +53,15 @@
   .bar > span { display: block; height: 100%; background: var(--accent); }
   .score { color: var(--muted); font-size: .85rem; }
   .copy { margin-top: 8px; padding: 6px 12px; min-height: 0; font-size: .9rem; }
+  .confirm { margin-left: 6px; }
+  .confirm:disabled { opacity: .5; cursor: default; }
+  #fb { margin-top: 14px; }
+  #fb .banner button { margin-left: 10px; padding: 4px 12px; min-height: 0; font-size: .9rem; }
+  #manual { display: none; margin-top: 16px; padding: 14px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; }
+  #manual p { margin: 0 0 10px; color: var(--muted); font-size: .95rem; }
+  #manual .row { display: flex; gap: 8px; }
+  #manual input { flex: 1; min-width: 0; font: inherit; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line);
+                  background: var(--bg); color: var(--ink); }
 
   #zoom { position: fixed; inset: 0; background: rgba(0,0,0,.85); display: none; align-items: center;
           justify-content: center; padding: 16px; z-index: 10; }
@@ -78,6 +87,14 @@
 
   <div id="status" role="status" aria-live="polite"></div>
   <ol id="results"></ol>
+  <div id="manual">
+    <p>Not the right design? Type the correct number and save it, so the next photo like this is found.</p>
+    <div class="row">
+      <input id="manualNo" type="text" placeholder="Design number, e.g. D1042" autocomplete="off">
+      <button id="manualSave" class="confirm" type="button" data-label="Save">Save</button>
+    </div>
+  </div>
+  <div id="fb" role="status" aria-live="polite"></div>
 </main>
 
 <div id="zoom"><img alt=""></div>
@@ -86,6 +103,8 @@
 const $ = (id) => document.getElementById(id);
 const drop = $("drop"), preview = $("preview"), statusEl = $("status"), results = $("results");
 let counter = 0;  // ignore a slow response if a newer search has started
+let lastFile = null;   // the photo being searched, re-sent if the manager confirms a design
+let saved = null;      // {design, id} once the manager has confirmed one for this photo
 
 $("pick").onclick = () => $("file").click();
 $("snap").onclick = () => $("camera").click();
@@ -103,7 +122,8 @@ function say(kind, text) { statusEl.innerHTML = `<div class="banner ${kind}"></d
 
 async function search(file) {
   const mine = ++counter;
-  results.innerHTML = "";
+  lastFile = file; saved = null;
+  results.innerHTML = ""; $("fb").innerHTML = ""; $("manual").style.display = "none"; $("manualNo").value = "";
   preview.src = URL.createObjectURL(file); preview.style.display = "block"; $("hint").style.display = "none";
   say("busy", "Searching the catalog…");
   try {
@@ -130,7 +150,7 @@ function show(data) {
     const li = document.createElement("li"); li.className = "match" + (i === 0 && data.confident ? " first" : "");
     const pct = Math.max(0, Math.min(100, Math.round((m.score - 0.2) / 0.8 * 100)));
     li.innerHTML = `<img alt=""><div><div class="rank"></div><div class="num"></div>
-      <div class="bar"><span></span></div><div class="score"></div><button class="copy" type="button">Copy number</button></div>`;
+      <div class="bar"><span></span></div><div class="score"></div><button class="copy" type="button">Copy number</button><button class="copy confirm" type="button" data-label="This is it">This is it</button></div>`;
     const img = li.querySelector("img"); img.src = m.thumb; img.alt = "Design " + m.design_number;
     img.onclick = () => { $("zoom").firstElementChild.src = m.image; $("zoom").style.display = "flex"; };
     li.querySelector(".rank").textContent = i === 0 ? "Closest" : "#" + (i + 1);
@@ -139,9 +159,53 @@ function show(data) {
     li.querySelector(".score").textContent = "Similarity " + m.score.toFixed(2);
     const btn = li.querySelector(".copy");
     btn.onclick = async () => { try { await navigator.clipboard.writeText(m.design_number); btn.textContent = "Copied"; setTimeout(() => btn.textContent = "Copy number", 1200); } catch {} };
+    const yes = li.querySelector(".confirm"); yes.onclick = () => sendFeedback(m.design_number, yes);
     results.appendChild(li);
   });
+  $("manual").style.display = "block";
 }
+
+// ---- "this was the right one": save the photo against the confirmed design number
+function fb(kind, text, undo) {
+  const box = $("fb"); box.innerHTML = `<div class="banner ${kind}"><span></span></div>`;
+  box.querySelector("span").textContent = text;
+  if (undo) { const b = document.createElement("button"); b.type = "button"; b.textContent = "Undo"; b.onclick = undo; box.firstChild.appendChild(b); }
+}
+function setConfirmButtons(disabled) {
+  document.querySelectorAll(".confirm").forEach(b => { b.disabled = disabled; b.textContent = b.dataset.label; });
+  $("manualNo").disabled = disabled;
+}
+
+async function sendFeedback(design, btn) {
+  if (!lastFile || saved) return;
+  if (!design) return fb("warn", "Type a design number first.");
+  setConfirmButtons(true); btn.textContent = "Saving…";
+  try {
+    const form = new FormData();
+    form.append("photo", lastFile, lastFile.name || "photo.jpg"); form.append("design_number", design);
+    const res = await fetch("/feedback", { method: "POST", body: form });
+    if (!res.ok) {
+      let detail = "Could not save that."; try { detail = (await res.json()).detail || detail; } catch {}
+      setConfirmButtons(false); return fb("err", detail);
+    }
+    const r = await res.json();
+    saved = { design, id: r.id };
+    btn.textContent = "Saved ✓";
+    fb("ok", `Saved. This photo will now help find ${design}.`, () => undo(saved));
+  } catch {
+    setConfirmButtons(false); fb("err", "Could not reach the server. Nothing was saved.");
+  }
+}
+
+async function undo(s) {
+  try {
+    const res = await fetch(`/feedback/${encodeURIComponent(s.design)}/${s.id}`, { method: "DELETE" });
+    if (!res.ok) return fb("err", "Could not undo. Try again.");
+    saved = null; setConfirmButtons(false); $("fb").innerHTML = "";
+  } catch { fb("err", "Could not reach the server."); }
+}
+$("manualSave").onclick = () => sendFeedback($("manualNo").value.trim(), $("manualSave"));
+$("manualNo").addEventListener("keydown", e => { if (e.key === "Enter") $("manualSave").click(); });
 
 $("zoom").onclick = () => { $("zoom").style.display = "none"; };
 document.addEventListener("keydown", e => { if (e.key === "Escape") $("zoom").style.display = "none"; });

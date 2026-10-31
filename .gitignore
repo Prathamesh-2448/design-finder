@@ -1,4 +1,5 @@
 data/
+catalog/
 eval_photos/
 __pycache__/
 .venv/
