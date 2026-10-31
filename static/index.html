@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Design Finder</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --card: #ffffff; --ink: #1c1b19; --muted: #6b6860; --line: #e2dfd8;
+    --accent: #1f5f4a; --accent-ink: #ffffff; --warn-bg: #fff4e0; --warn-ink: #7a4b00;
+    --ok-bg: #e6f3ed; --ok-ink: #14503b; --err-bg: #fde8e6; --err-ink: #8a1f14;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151513; --card: #201f1c; --ink: #f1efe9; --muted: #a09c92; --line: #343230;
+      --accent: #4fb28f; --accent-ink: #0b1a14; --warn-bg: #3a2c10; --warn-ink: #f2cf8a;
+      --ok-bg: #16342a; --ok-ink: #9be0c3; --err-bg: #3d1b17; --err-ink: #f3a79e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.35rem; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+
+  #drop { background: var(--card); border: 2px dashed var(--line); border-radius: 14px;
+          padding: 28px 16px; text-align: center; transition: border-color .15s; }
+  #drop.over { border-color: var(--accent); }
+  #drop p { margin: 0 0 14px; color: var(--muted); }
+  .buttons { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  button, .btn { appearance: none; border: 1px solid var(--line); background: var(--card); color: var(--ink);
+                 font: inherit; padding: 12px 18px; border-radius: 10px; cursor: pointer; min-height: 48px; }
+  .primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  input[type=file] { display: none; }
+  #preview { max-width: 100%; max-height: 220px; border-radius: 10px; margin: 0 auto 14px; display: none; }
+
+  #status { margin: 20px 0 0; }
+  .banner { border-radius: 12px; padding: 12px 14px; font-weight: 500; }
+  .banner.ok { background: var(--ok-bg); color: var(--ok-ink); }
+  .banner.warn { background: var(--warn-bg); color: var(--warn-ink); }
+  .banner.err { background: var(--err-bg); color: var(--err-ink); }
+  .banner.busy { background: var(--card); border: 1px solid var(--line); color: var(--muted); }
+
+  #results { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 12px; }
+  .match { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px;
+           display: grid; grid-template-columns: 120px 1fr; gap: 14px; align-items: center; }
+  .match.first { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .match img { width: 120px; height: 120px; object-fit: cover; border-radius: 10px; background: var(--line); cursor: zoom-in; }
+  .num { font-size: 1.5rem; font-weight: 700; letter-spacing: .01em; word-break: break-all; }
+  .rank { color: var(--muted); font-size: .85rem; }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; margin: 8px 0 4px; overflow: hidden; }
+  .bar > span { display: block; height: 100%; background: var(--accent); }
+  .score { color: var(--muted); font-size: .85rem; }
+  .copy { margin-top: 8px; padding: 6px 12px; min-height: 0; font-size: .9rem; }
+
+  #zoom { position: fixed; inset: 0; background: rgba(0,0,0,.85); display: none; align-items: center;
+          justify-content: center; padding: 16px; z-index: 10; }
+  #zoom img { max-width: 100%; max-height: 100%; border-radius: 8px; }
+  @media (max-width: 420px) { .match { grid-template-columns: 96px 1fr; } .match img { width: 96px; height: 96px; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Design Finder</h1>
+  <p class="sub">Upload the customer's photo to get the design number.</p>
+
+  <div id="drop">
+    <img id="preview" alt="Selected photo">
+    <p id="hint">Drop a photo here, paste one (Ctrl+V), or choose below.</p>
+    <div class="buttons">
+      <button class="primary" id="pick" type="button">Choose photo</button>
+      <button id="snap" type="button">Take photo</button>
+    </div>
+    <input id="file" type="file" accept="image/*">
+    <input id="camera" type="file" accept="image/*" capture="environment">
+  </div>
+
+  <div id="status" role="status" aria-live="polite"></div>
+  <ol id="results"></ol>
+</main>
+
+<div id="zoom"><img alt=""></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const drop = $("drop"), preview = $("preview"), statusEl = $("status"), results = $("results");
+let counter = 0;  // ignore a slow response if a newer search has started
+
+$("pick").onclick = () => $("file").click();
+$("snap").onclick = () => $("camera").click();
+$("file").onchange = $("camera").onchange = (e) => { if (e.target.files[0]) search(e.target.files[0]); e.target.value = ""; };
+
+["dragenter", "dragover"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if (f) search(f); });
+document.addEventListener("paste", e => {
+  const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith("image/"));
+  if (item) search(item.getAsFile());
+});
+
+function say(kind, text) { statusEl.innerHTML = `<div class="banner ${kind}"></div>`; statusEl.firstChild.textContent = text; }
+
+async function search(file) {
+  const mine = ++counter;
+  results.innerHTML = "";
+  preview.src = URL.createObjectURL(file); preview.style.display = "block"; $("hint").style.display = "none";
+  say("busy", "Searching the catalog…");
+  try {
+    const form = new FormData(); form.append("photo", file, file.name || "photo.jpg");
+    const res = await fetch("/search", { method: "POST", body: form });
+    if (mine !== counter) return;
+    if (!res.ok) {
+      let detail = "Something went wrong."; try { detail = (await res.json()).detail || detail; } catch {}
+      return say("err", detail);
+    }
+    show(await res.json());
+  } catch (err) {
+    if (mine === counter) say("err", "Could not reach the server. Check the connection and try again.");
+  }
+}
+
+function show(data) {
+  const best = data.matches[0];
+  if (data.confident) say("ok", `Best match: ${best.design_number}. Compare with the photo to be sure.`);
+  else say("warn", "No confident match. This may be a new design. Closest ones are listed below.");
+
+  results.innerHTML = "";
+  data.matches.forEach((m, i) => {
+    const li = document.createElement("li"); li.className = "match" + (i === 0 && data.confident ? " first" : "");
+    const pct = Math.max(0, Math.min(100, Math.round((m.score - 0.2) / 0.8 * 100)));
+    li.innerHTML = `<img alt=""><div><div class="rank"></div><div class="num"></div>
+      <div class="bar"><span></span></div><div class="score"></div><button class="copy" type="button">Copy number</button></div>`;
+    const img = li.querySelector("img"); img.src = m.thumb; img.alt = "Design " + m.design_number;
+    img.onclick = () => { $("zoom").firstElementChild.src = m.image; $("zoom").style.display = "flex"; };
+    li.querySelector(".rank").textContent = i === 0 ? "Closest" : "#" + (i + 1);
+    li.querySelector(".num").textContent = m.design_number;
+    li.querySelector(".bar span").style.width = pct + "%";
+    li.querySelector(".score").textContent = "Similarity " + m.score.toFixed(2);
+    const btn = li.querySelector(".copy");
+    btn.onclick = async () => { try { await navigator.clipboard.writeText(m.design_number); btn.textContent = "Copied"; setTimeout(() => btn.textContent = "Copy number", 1200); } catch {} };
+    results.appendChild(li);
+  });
+}
+
+$("zoom").onclick = () => { $("zoom").style.display = "none"; };
+document.addEventListener("keydown", e => { if (e.key === "Escape") $("zoom").style.display = "none"; });
+</script>
+</body>
+</html>

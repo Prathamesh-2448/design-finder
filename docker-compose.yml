@@ -1,0 +1,19 @@
+services:
+  design-finder:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./catalog:/app/catalog      # design images: file name = design number
+      - ./data:/app/data            # index (rebuilt by index.py)
+      - ./eval_photos:/app/eval_photos
+    environment:
+      # Set these to require a login (recommended on a public server):
+      # APP_USER: manager
+      # APP_PASSWORD: change-me
+      # Set after running evaluate.py:
+      # MIN_SCORE: "0.60"
+      # Uncomment if customers' photos often arrive sideways:
+      # QUERY_ROTATIONS: "0,90,180,270"
+      TOP_K: "5"
+    restart: unless-stopped
